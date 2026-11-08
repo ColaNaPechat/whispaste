@@ -539,11 +539,20 @@ class HotkeyService extends Notifier<void> {
     _wireMonitor();
   }
 
-  /// Routes the monitor's events into the global action. Key-down only
+  String? _activeHeldActionId;
+
+  /// Routes the monitor's events into the active action. Key-down only
   /// arrives from the Linux portal path; a press the X11 grab reports as well
   /// is deduplicated by [_handleKeyDown]'s held-key guard.
   void _wireMonitor() {
-    _monitor.onKeyUp = () => _handleKeyUp(_globalActionId, 'Global');
+    _monitor.onKeyUp = () {
+      final action = _activeHeldActionId ?? _globalActionId;
+      final label = action == _smartModeActionId
+          ? 'SmartMode'
+          : (action == _selectionEditActionId ? 'SelectionEdit' : 'Global');
+      _handleKeyUp(action, label);
+      _activeHeldActionId = null;
+    };
     _monitor.onKeyDown = () => _handleKeyDown(_globalActionId, 'Global');
   }
 
@@ -1220,6 +1229,7 @@ class HotkeyService extends Notifier<void> {
     // so it is neither a dismissal nor a snooze.
     _promptArbiter?.closeOpenPrompt();
     if (actionId == _globalActionId) {
+      _activeHeldActionId = _globalActionId;
       // Stamp t₀ for hotkey→overlay latency BEFORE dispatching so the mark
       // captures the earliest possible Dart-layer moment of this event.
       // Counterpart: PerfMarkers.markOverlayShown() in FloatingOverlayService.
@@ -1228,7 +1238,6 @@ class HotkeyService extends Notifier<void> {
       // Arm the RawInput release-watch (Windows): RegisterHotKey hides the
       // hotkey key's DOWN from RawInput, so the native monitor snapshots the
       // held key now and reports its release. No-op on other platforms (#39).
-      // Only the global action uses the shared monitor.
       unawaited(_monitor.armRelease());
     } else if (actionId == _quickNoteActionId) {
       // Same t₀ stamp as the global action — the quick-note action also
@@ -1244,14 +1253,18 @@ class HotkeyService extends Notifier<void> {
       // hotkey→overlay latency marker doesn't apply.
       onSnippetPickerHotkeyPressed?.call();
     } else if (actionId == _smartModeActionId) {
+      _activeHeldActionId = _smartModeActionId;
       // Same t₀ stamp rationale as the quick-note action — this action also
       // drives the recording overlay.
       PerfMarkers.instance.markHotkeyPressed();
       onSmartModeHotkeyPressed?.call();
+      unawaited(_monitor.armRelease());
     } else if (actionId == _selectionEditActionId) {
+      _activeHeldActionId = _selectionEditActionId;
       // Drives the recording overlay too — same t₀ stamp rationale.
       PerfMarkers.instance.markHotkeyPressed();
       onSelectionEditHotkeyPressed?.call();
+      unawaited(_monitor.armRelease());
     } else if (actionId == _snippetAdvanceActionId) {
       // No perf mark — the field advance ends a recording rather than
       // starting the hotkey→overlay hot path this marker measures.
