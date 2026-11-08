@@ -1,0 +1,161 @@
+name: Build Fixed Windows App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'fix/**'
+
+jobs:
+  build-windows:
+    name: Build WhisPaste Windows (Fixed)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.1
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Windows release
+        shell: pwsh
+        run: |
+          $raw = (Get-Content pubspec.yaml | Select-String '^\s*version:').ToString()
+          $version = ($raw -replace '^\s*version:\s*', '' -replace '\+.*', '').Trim()
+
+          flutter build windows --release --no-tree-shake-icons `
+            --dart-define=APP_VERSION="$version"
+
+      - name: Cache Vulkan SDK
+        id: vulkan_sdk_cache
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\1.4.328.1
+          key: vulkan-sdk-windows-1.4.328.1
+
+      - name: Setup Vulkan SDK
+        if: steps.vulkan_sdk_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $VulkanVersion = "1.4.328.1"
+          $InstallerUrl = "https://sdk.lunarg.com/sdk/download/$VulkanVersion/windows/vulkansdk-windows-X64-$VulkanVersion.exe"
+          $InstallerPath = "$env:RUNNER_TEMP\vulkan-sdk.exe"
+          Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
+          & $InstallerPath --root "C:\VulkanSDK\$VulkanVersion" --accept-licenses --default-answer --confirm-command install
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK installer exited with code $LASTEXITCODE" }
+
+      - name: Add Vulkan SDK to PATH/env
+        shell: pwsh
+        run: |
+          echo "VULKAN_SDK=C:\VulkanSDK\1.4.328.1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "C:\VulkanSDK\1.4.328.1\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Cache libwhisper build (Windows)
+        id: libwhisper_cache
+        uses: actions/cache@v4
+        with:
+          path: .build/libwhisper/windows
+          key: libwhisper-windows-v1.9.5-vulkan-v4-${{ hashFiles('scripts/bundle-libwhisper-windows.ps1', 'scripts/collect-pdbs-windows.ps1', 'native/ffi_guard/**') }}
+
+      - name: Clone pinned whisper.cpp source
+        if: steps.libwhisper_cache.outputs.cache-hit != 'true'
+        run: git clone --depth 1 --branch v1.9.5 https://github.com/ggerganov/whisper.cpp .build/deps/whisper.cpp/v1.9.5
+
+      - name: Activate MSVC dev environment (x64)
+        if: steps.libwhisper_cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build libwhisper (Windows)
+        if: steps.libwhisper_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $env:CFLAGS = '/Z7'
+          $env:CXXFLAGS = '/Z7'
+          $env:LDFLAGS = '/DEBUG /OPT:REF /OPT:ICF'
+          cmake -S .build/deps/whisper.cpp/v1.9.5 -B .build/libwhisper/windows-build `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON `
+            -DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON `
+            -DWHISPER_BUILD_EXAMPLES=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF
+          cmake --build .build/libwhisper/windows-build --config Release -j
+          cmake -S native/ffi_guard -B .build/libwhisper/windows-build/ffi_guard `
+            -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DWHISPER_SOURCE_DIR="$PWD/.build/deps/whisper.cpp/v1.9.5"
+          cmake --build .build/libwhisper/windows-build/ffi_guard --config Release
+          New-Item -ItemType Directory -Force -Path .build/libwhisper/windows | Out-Null
+          Copy-Item .build/libwhisper/windows-build/bin/*.dll .build/libwhisper/windows/ -Force
+          Copy-Item .build/libwhisper/windows-build/ffi_guard/wp_ffi_guard.dll .build/libwhisper/windows/ -Force
+          pwsh scripts/collect-pdbs-windows.ps1 -DllDir .build/libwhisper/windows -OutDir .build/libwhisper/windows/pdb
+
+      - name: Stage libwhisper next to whispaste.exe
+        shell: pwsh
+        run: |
+          pwsh scripts/bundle-libwhisper-windows.ps1 -Source .build/libwhisper/windows
+
+      - name: Cache libllama build (Windows)
+        id: libllama_cache
+        uses: actions/cache@v4
+        with:
+          path: .build/libllama/windows
+          key: libllama-windows-b10150-dee2a84-${{ hashFiles('scripts/build-libllama-windows.ps1', 'scripts/build-smartmode-shim-windows.ps1', 'scripts/collect-pdbs-windows.ps1', 'native/smart_mode/**') }}
+
+      - name: Clone pinned llama.cpp source
+        if: steps.libllama_cache.outputs.cache-hit != 'true'
+        run: git clone --depth 1 --branch b10150 https://github.com/ggml-org/llama.cpp .build/deps/llama.cpp/b10150
+
+      - name: Build libllama (Windows)
+        if: steps.libllama_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: pwsh scripts/build-libllama-windows.ps1
+
+      - name: Build smartmode_shim (Windows)
+        if: steps.libllama_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: pwsh scripts/build-smartmode-shim-windows.ps1
+
+      - name: Stage libllama next to whispaste.exe
+        shell: pwsh
+        run: pwsh scripts/bundle-libllama-windows.ps1 -Source .build/libllama/windows
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $raw = (Get-Content pubspec.yaml | Select-String '^\s*version:').ToString()
+          $version = ($raw -replace '^\s*version:\s*', '' -replace '\+.*', '').Trim()
+          $pubspecRaw = (Get-Content pubspec.yaml | Select-String '^\s*version:').ToString()
+          $pubspecVersion = ($pubspecRaw -replace '^\s*version:\s*', '').Trim()
+          $buildNumber = '0'
+          if ($pubspecVersion -match '\+(\d+)$') {
+            $buildNumber = $Matches[1]
+          }
+          $parts = $version -split '[.\-]'
+          $numeric = "$($parts[0]).$($parts[1]).$($parts[2]).$buildNumber"
+
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            /DPRODUCT_VERSION=$version `
+            /DPRODUCT_VERSION_NUMERIC=$numeric `
+            installer\whispaste.nsi
+
+          if ($LASTEXITCODE -ne 0) { throw "NSIS build failed" }
+          Write-Host "Built: installer\WhisPaste-Setup.exe"
+
+      - name: Upload WhisPaste Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhisPaste-Setup-Fixed
+          path: installer/WhisPaste-Setup.exe
