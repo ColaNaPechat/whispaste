@@ -13,3 +13,4 @@ if ($DllDir -and $OutDir -and (Test-Path $DllDir)) {
 }
 
 exit 0
+

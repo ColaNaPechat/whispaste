@@ -97,12 +97,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path .build/libwhisper/windows | Out-Null
           Copy-Item .build/libwhisper/windows-build/bin/*.dll .build/libwhisper/windows/ -Force
           Copy-Item .build/libwhisper/windows-build/ffi_guard/wp_ffi_guard.dll .build/libwhisper/windows/ -Force
-          & ./scripts/collect-pdbs-windows.ps1 -DllDir .build/libwhisper/windows -OutDir .build/libwhisper/windows/pdb
+          pwsh scripts/collect-pdbs-windows.ps1 -DllDir .build/libwhisper/windows -OutDir .build/libwhisper/windows/pdb
 
       - name: Stage libwhisper next to whispaste.exe
         shell: pwsh
-        run: |
-          & ./scripts/bundle-libwhisper-windows.ps1 -Source .build/libwhisper/windows
+        run: pwsh scripts/bundle-libwhisper-windows.ps1 -Source .build/libwhisper/windows
 
       - name: Cache libllama build (Windows)
         id: libllama_cache
@@ -118,16 +117,16 @@ jobs:
       - name: Build libllama (Windows)
         if: steps.libllama_cache.outputs.cache-hit != 'true'
         shell: pwsh
-        run: & ./scripts/build-libllama-windows.ps1
+        run: pwsh scripts/build-libllama-windows.ps1
 
       - name: Build smartmode_shim (Windows)
         if: steps.libllama_cache.outputs.cache-hit != 'true'
         shell: pwsh
-        run: & ./scripts/build-smartmode-shim-windows.ps1
+        run: pwsh scripts/build-smartmode-shim-windows.ps1
 
       - name: Stage libllama next to whispaste.exe
         shell: pwsh
-        run: & ./scripts/bundle-libllama-windows.ps1 -Source .build/libllama/windows
+        run: pwsh scripts/bundle-libllama-windows.ps1 -Source .build/libllama/windows
 
       - name: Install NSIS
         run: choco install nsis -y --no-progress
