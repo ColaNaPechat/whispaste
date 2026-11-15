@@ -64,12 +64,12 @@ const List<ParakeetModelFile> parakeetModelFiles = [
   ParakeetModelFile(
     filename: 'encoder.int8.onnx',
     url: '$_repoBase/encoder.int8.onnx',
-    sizeBytes: 652184281,
+    sizeBytes: 652282294,
   ),
   ParakeetModelFile(
     filename: 'decoder.int8.onnx',
     url: '$_repoBase/decoder.int8.onnx',
-    sizeBytes: 11845275,
+    sizeBytes: 11845274,
   ),
   ParakeetModelFile(
     filename: 'joiner.int8.onnx',
