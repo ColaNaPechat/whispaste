@@ -582,3 +582,452 @@ bool _isAlphanumeric(int codeUnit) {
       (codeUnit >= 0x61 && codeUnit <= 0x7A) || // a-z
       (codeUnit >= 0x30 && codeUnit <= 0x39); // 0-9
 }
+
+// ---------------------------------------------------------------------------
+// Russian number-word transform & in-phrase numeric mode
+// ---------------------------------------------------------------------------
+
+final _ruWsRegex = RegExp(r'\s+');
+final _ruDigitTokenRegex = RegExp(r'^-?[0-9]+(?:[.,][0-9]+)*$');
+final _ruNumericResultRegex = RegExp(
+  r'^-?[0-9]+(?:[.,][0-9]+)*(?:x-?[0-9]+(?:[.,][0-9]+)*)*$',
+);
+
+const _ruZeroWords = {'ноль', 'нуль'};
+
+const _ruOnes = {
+  'один': 1,
+  'одна': 1,
+  'одно': 1,
+  'одного': 1,
+  'одной': 1,
+  'одну': 1,
+  'одним': 1,
+  'два': 2,
+  'две': 2,
+  'двух': 2,
+  'двум': 2,
+  'двумя': 2,
+  'три': 3,
+  'трёх': 3,
+  'трех': 3,
+  'трём': 3,
+  'трем': 3,
+  'тремя': 3,
+  'четыре': 4,
+  'четырёх': 4,
+  'четырех': 4,
+  'четырём': 4,
+  'четырем': 4,
+  'четырьмя': 4,
+  'пять': 5,
+  'пяти': 5,
+  'пятью': 5,
+  'шесть': 6,
+  'шести': 6,
+  'шестью': 6,
+  'семь': 7,
+  'семи': 7,
+  'семью': 7,
+  'восемь': 8,
+  'восьми': 8,
+  'восемью': 8,
+  'восьмью': 8,
+  'девять': 9,
+  'девяти': 9,
+  'девятью': 9,
+};
+
+const _ruTeens = {
+  'десять': 10,
+  'десяти': 10,
+  'одиннадцать': 11,
+  'одиннадцати': 11,
+  'двенадцать': 12,
+  'двенадцати': 12,
+  'тринадцать': 13,
+  'тринадцати': 13,
+  'четырнадцать': 14,
+  'четырнадцати': 14,
+  'пятнадцать': 15,
+  'пятнадцати': 15,
+  'шестнадцать': 16,
+  'шестнадцати': 16,
+  'семнадцать': 17,
+  'семнадцати': 17,
+  'восемнадцать': 18,
+  'восемнадцати': 18,
+  'девятнадцать': 19,
+  'девятнадцати': 19,
+};
+
+const _ruTens = {
+  'двадцать': 20,
+  'двадцати': 20,
+  'тридцать': 30,
+  'тридцати': 30,
+  'сорок': 40,
+  'сорока': 40,
+  'пятьдесят': 50,
+  'пятидесяти': 50,
+  'шестьдесят': 60,
+  'шестидесяти': 60,
+  'семьдесят': 70,
+  'семидесяти': 70,
+  'восемьдесят': 80,
+  'восьмидесяти': 80,
+  'девяносто': 90,
+  'девяноста': 90,
+};
+
+const _ruHundreds = {
+  'сто': 100,
+  'ста': 100,
+  'двести': 200,
+  'двухсот': 200,
+  'триста': 300,
+  'трёхсот': 300,
+  'трехсот': 300,
+  'четыреста': 400,
+  'четырёхсот': 400,
+  'четырехсот': 400,
+  'пятьсот': 500,
+  'пятисот': 500,
+  'шестьсот': 600,
+  'шестисот': 600,
+  'семьсот': 700,
+  'семисот': 700,
+  'восемьсот': 800,
+  'восьмисот': 800,
+  'девятьсот': 900,
+  'девятисот': 900,
+};
+
+const _ruScales = {
+  'тысяча': 1000,
+  'тысячи': 1000,
+  'тысяч': 1000,
+  'тысячу': 1000,
+  'тысячей': 1000,
+  'тысячью': 1000,
+  'миллион': 1000000,
+  'миллиона': 1000000,
+  'миллионов': 1000000,
+};
+
+const _ruDecimalCommaWords = {'запятая', 'целых', 'целая'};
+const _ruDecimalDotWords = {'точка'};
+const _ruFractionSuffixes = {
+  'десятых',
+  'десятая',
+  'сотых',
+  'сотая',
+  'тысячных',
+  'тысячная',
+};
+const _ruMultiplyWords = {'на', 'х', 'x', '×'};
+
+class _RuToken {
+  const _RuToken({
+    required this.raw,
+    required this.leading,
+    required this.core,
+    required this.trailing,
+  });
+
+  final String raw;
+  final String leading;
+  final String core;
+  final String trailing;
+}
+
+bool _isRuWordChar(int c) {
+  return (c >= 0x30 && c <= 0x39) || // 0-9
+      (c >= 0x41 && c <= 0x5A) || // A-Z
+      (c >= 0x61 && c <= 0x7A) || // a-z
+      (c >= 0x0400 && c <= 0x04FF) || // Cyrillic
+      c == 0x00D7; // ×
+}
+
+_RuToken _splitRuToken(String raw) {
+  var start = 0;
+  var end = raw.length;
+  while (start < end &&
+      !_isRuWordChar(raw.codeUnitAt(start)) &&
+      raw.codeUnitAt(start) != 0x2D /* - */) {
+    start++;
+  }
+  while (end > start && !_isRuWordChar(raw.codeUnitAt(end - 1))) {
+    end--;
+  }
+  if (start >= end) {
+    return _RuToken(raw: raw, leading: '', core: '', trailing: '');
+  }
+  return _RuToken(
+    raw: raw,
+    leading: raw.substring(0, start),
+    core: raw.substring(start, end).toLowerCase(),
+    trailing: raw.substring(end),
+  );
+}
+
+bool _isRuNumberWord(String w) {
+  return _ruZeroWords.contains(w) ||
+      _ruOnes.containsKey(w) ||
+      _ruTeens.containsKey(w) ||
+      _ruTens.containsKey(w) ||
+      _ruHundreds.containsKey(w) ||
+      _ruScales.containsKey(w);
+}
+
+class _ParsedRuNumber {
+  const _ParsedRuNumber({
+    required this.text,
+    required this.nextIndex,
+    required this.leading,
+    required this.trailing,
+    required this.isZeroWord,
+    required this.fromWords,
+  });
+
+  final String text;
+  final int nextIndex;
+  final String leading;
+  final String trailing;
+  final bool isZeroWord;
+  final bool fromWords;
+}
+
+/// Parses a single Russian number (or existing digit token) starting at [index].
+/// Returns `null` if tokens[index] does not start a number.
+_ParsedRuNumber? _parseRuNumberAt(List<_RuToken> tokens, int index) {
+  if (index >= tokens.length) return null;
+  final first = tokens[index];
+  if (first.core.isEmpty) return null;
+
+  // Existing digit token (e.g. "333", "0,5", "-12").
+  if (_ruDigitTokenRegex.hasMatch(first.core)) {
+    return _ParsedRuNumber(
+      text: first.core,
+      nextIndex: index + 1,
+      leading: first.leading,
+      trailing: first.trailing,
+      isZeroWord: false,
+      fromWords: false,
+    );
+  }
+
+  var pos = index;
+  var negative = false;
+  var leading = first.leading;
+
+  if (first.core == 'минус') {
+    if (pos + 1 >= tokens.length || first.trailing.isNotEmpty) return null;
+    final next = tokens[pos + 1];
+    if (!_isRuNumberWord(next.core) && !_ruDigitTokenRegex.hasMatch(next.core)) {
+      return null;
+    }
+    negative = true;
+    pos++;
+    if (_ruDigitTokenRegex.hasMatch(next.core)) {
+      final numText = next.core.startsWith('-') ? next.core : '-${next.core}';
+      return _ParsedRuNumber(
+        text: numText,
+        nextIndex: pos + 1,
+        leading: leading,
+        trailing: next.trailing,
+        isZeroWord: false,
+        fromWords: true,
+      );
+    }
+  }
+
+  final startTok = tokens[pos];
+  if (_ruZeroWords.contains(startTok.core)) {
+    return _ParsedRuNumber(
+      text: negative ? '-0' : '0',
+      nextIndex: pos + 1,
+      leading: leading,
+      trailing: startTok.trailing,
+      isZeroWord: !negative,
+      fromWords: true,
+    );
+  }
+
+  if (!_isRuNumberWord(startTok.core)) return null;
+
+  // Rank: 4=scale(1000+), 3=hundreds, 2=tens, 1=ones/teens.
+  var total = 0;
+  var group = 0;
+  var lastRank = 99;
+  var trailing = '';
+
+  while (pos < tokens.length) {
+    final tok = tokens[pos];
+    final w = tok.core;
+    if (!_isRuNumberWord(w) || _ruZeroWords.contains(w)) break;
+    if (pos > index && !negative && tok.leading.isNotEmpty) break;
+
+    if (_ruHundreds.containsKey(w)) {
+      if (lastRank <= 3) break;
+      group += _ruHundreds[w]!;
+      lastRank = 3;
+    } else if (_ruTens.containsKey(w)) {
+      if (lastRank <= 2) break;
+      group += _ruTens[w]!;
+      lastRank = 2;
+    } else if (_ruTeens.containsKey(w)) {
+      if (lastRank <= 2) break;
+      group += _ruTeens[w]!;
+      lastRank = 1;
+    } else if (_ruOnes.containsKey(w)) {
+      if (lastRank <= 1) break;
+      group += _ruOnes[w]!;
+      lastRank = 1;
+    } else if (_ruScales.containsKey(w)) {
+      final scale = _ruScales[w]!;
+      final multiplier = group == 0 ? 1 : group;
+      total += multiplier * scale;
+      group = 0;
+      lastRank = 4;
+    } else {
+      break;
+    }
+
+    trailing = tok.trailing;
+    pos++;
+    // Stop number assembly on any trailing punctuation (e.g. "пять, шесть").
+    if (trailing.isNotEmpty) break;
+  }
+
+  final value = total + group;
+  return _ParsedRuNumber(
+    text: negative ? '-$value' : '$value',
+    nextIndex: pos,
+    leading: leading,
+    trailing: trailing,
+    isZeroWord: false,
+    fromWords: true,
+  );
+}
+
+/// Applies numeric mode to [text]:
+/// - Handles pure DE/EN numeric strings via [toNumericOnly].
+/// - Converts Russian number words anywhere inside phrases (including
+///   decimals like "ноль пять" → "0,5" and dimensions like
+///   "триста тридцать три на два" → "333x2").
+/// - Strips a trailing period when the whole output is a standalone number or
+///   dimension expression.
+String applyNumericMode(String text) {
+  final deOrEn = toNumericOnly(text);
+  if (deOrEn != null) return deOrEn;
+
+  final trimmed = text.trim();
+  if (trimmed.isEmpty) return text;
+
+  final rawTokens = trimmed.split(_ruWsRegex);
+  final tokens = rawTokens.map(_splitRuToken).toList(growable: false);
+  final out = <String>[];
+
+  var i = 0;
+  while (i < tokens.length) {
+    final first = _parseRuNumberAt(tokens, i);
+    if (first == null) {
+      out.add(tokens[i].raw);
+      i++;
+      continue;
+    }
+
+    var acc = first.text;
+    var trailing = first.trailing;
+    var next = first.nextIndex;
+    var prevZeroWord = first.isZeroWord;
+
+    // Chain decimals ("ноль пять", "два целых пять десятых") and
+    // dimension multipliers ("триста тридцать три на два" → "333x2").
+    while (trailing.isEmpty && next < tokens.length) {
+      final curTok = tokens[next];
+      final w = curTok.core;
+
+      // Case 1: "ноль пять" / "ноль 5" → "0,5"
+      if (prevZeroWord && curTok.leading.isEmpty) {
+        final frac = _parseRuNumberAt(tokens, next);
+        if (frac != null && !frac.text.startsWith('-')) {
+          acc = '0,${frac.text}';
+          trailing = frac.trailing;
+          next = frac.nextIndex;
+          prevZeroWord = false;
+          continue;
+        }
+      }
+
+      // Case 2: "<num1> запятая/целых/точка <num2> [десятых/сотых/тысячных]"
+      final isCommaWord = _ruDecimalCommaWords.contains(w);
+      final isDotWord = _ruDecimalDotWords.contains(w);
+      if ((isCommaWord || isDotWord) &&
+          curTok.leading.isEmpty &&
+          curTok.trailing.isEmpty) {
+        final frac = _parseRuNumberAt(tokens, next + 1);
+        if (frac != null && frac.leading.isEmpty && !frac.text.startsWith('-')) {
+          final sep = isDotWord ? '.' : ',';
+          acc = '$acc$sep${frac.text}';
+          trailing = frac.trailing;
+          next = frac.nextIndex;
+          prevZeroWord = false;
+          if (trailing.isEmpty &&
+              next < tokens.length &&
+              _ruFractionSuffixes.contains(tokens[next].core) &&
+              tokens[next].leading.isEmpty) {
+            trailing = tokens[next].trailing;
+            next++;
+          }
+          continue;
+        }
+      }
+
+      // Case 3: "<num1> на <num2>" → "<num1>x<num2>"
+      if (_ruMultiplyWords.contains(w) &&
+          curTok.leading.isEmpty &&
+          curTok.trailing.isEmpty) {
+        final rhs = _parseRuNumberAt(tokens, next + 1);
+        if (rhs != null && rhs.leading.isEmpty) {
+          // Allow rhs itself to start with "ноль пять" → "0,5".
+          var rhsText = rhs.text;
+          var rhsTrailing = rhs.trailing;
+          var rhsNext = rhs.nextIndex;
+          if (rhs.isZeroWord && rhsTrailing.isEmpty && rhsNext < tokens.length) {
+            final rhsFrac = _parseRuNumberAt(tokens, rhsNext);
+            if (rhsFrac != null &&
+                rhsFrac.leading.isEmpty &&
+                !rhsFrac.text.startsWith('-')) {
+              rhsText = '0,${rhsFrac.text}';
+              rhsTrailing = rhsFrac.trailing;
+              rhsNext = rhsFrac.nextIndex;
+            }
+          }
+          acc = '${acc}x$rhsText';
+          trailing = rhsTrailing;
+          next = rhsNext;
+          prevZeroWord = false;
+          continue;
+        }
+      }
+
+      break;
+    }
+
+    out.add('${first.leading}$acc$trailing');
+    i = next;
+  }
+
+  var result = out.join(' ');
+  // If the entire output is just a standalone number or dimension expression
+  // with a trailing period (added by STT), strip the trailing period.
+  if (result.endsWith('.')) {
+    final withoutDot = result.substring(0, result.length - 1);
+    if (_ruNumericResultRegex.hasMatch(withoutDot)) {
+      result = withoutDot;
+    }
+  }
+  return result;
+}

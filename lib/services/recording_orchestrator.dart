@@ -1268,7 +1268,7 @@ class RecordingOrchestrator extends Notifier<void> {
       // itn-cad-zahlen PRD): the history entry keeps the pre-transform
       // text — no second DB write in this latency-critical path.
       if (settings.stt.numericOnlyMode) {
-        finalText = toNumericOnly(finalText) ?? finalText;
+        finalText = applyNumericMode(finalText);
       }
 
       // ── Punctuation strip (always applied after text replacements) ──
