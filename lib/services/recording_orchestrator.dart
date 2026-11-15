@@ -1519,14 +1519,22 @@ class RecordingOrchestrator extends Notifier<void> {
     // installed model even if one exists — a missing/invalid API key or a
     // network failure surfaces as the same silent-fallback path below, via
     // the engine itself throwing.
-    if (provider.isLocal &&
-        !ref.read(smartModeDownloadProvider).modelDownloaded) {
-      _log.info(
-        '[$sid] Smart Mode $preset selected but model not downloaded — '
-        'falling back to raw transcript',
+    if (provider.isLocal) {
+      await ref.read(smartModeDownloadProvider.notifier).awaitInitialScan().timeout(
+        _selectionEditScanTimeout,
+        onTimeout: () => _log.warning(
+          'Smart Mode startup scan still pending after '
+          '${_selectionEditScanTimeout.inSeconds}s — treating model as missing',
+        ),
       );
-      _notifySmartModeFallback();
-      return rawText;
+      if (!ref.read(smartModeDownloadProvider).modelDownloaded) {
+        _log.info(
+          '[$sid] Smart Mode $preset selected but model not downloaded — '
+          'falling back to raw transcript',
+        );
+        _notifySmartModeFallback();
+        return rawText;
+      }
     }
 
     final systemPrompt = smartModeSystemPromptFor(

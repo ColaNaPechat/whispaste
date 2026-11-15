@@ -73,6 +73,10 @@ class SmartModeRetroactiveService {
     required SmartModePreset preset,
     SmartModeTargetLanguage? targetLanguage,
   }) async {
+    await _ref.read(smartModeDownloadProvider.notifier).awaitInitialScan().timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {},
+    );
     if (!_ref.read(smartModeDownloadProvider).modelDownloaded) {
       return const SmartModeRetroactiveFailure(
         SmartModeRetroactiveFailureReason.modelMissing,
