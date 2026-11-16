@@ -588,6 +588,7 @@ bool _isAlphanumeric(int codeUnit) {
 // ---------------------------------------------------------------------------
 
 final _ruWsRegex = RegExp(r'\s+');
+final _ruCyrillicRegex = RegExp(r'[\u0400-\u04FF]');
 final _ruDigitTokenRegex = RegExp(r'^-?[0-9]+(?:[.,][0-9]+)*$');
 final _ruNumericResultRegex = RegExp(
   r'^-?[0-9]+(?:[.,][0-9]+)*(?:x-?[0-9]+(?:[.,][0-9]+)*)*$',
@@ -919,8 +920,10 @@ _ParsedRuNumber? _parseRuNumberAt(List<_RuToken> tokens, int index) {
 /// - Strips a trailing period when the whole output is a standalone number or
 ///   dimension expression.
 String applyNumericMode(String text) {
-  final deOrEn = toNumericOnly(text);
-  if (deOrEn != null) return deOrEn;
+  if (!_ruCyrillicRegex.hasMatch(text)) {
+    final deOrEn = toNumericOnly(text);
+    if (deOrEn != null) return deOrEn;
+  }
 
   final trimmed = text.trim();
   if (trimmed.isEmpty) return text;
