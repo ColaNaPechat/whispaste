@@ -590,8 +590,9 @@ bool _isAlphanumeric(int codeUnit) {
 final _ruWsRegex = RegExp(r'\s+');
 final _ruCyrillicRegex = RegExp(r'[\u0400-\u04FF]');
 final _ruDigitTokenRegex = RegExp(r'^-?[0-9]+(?:[.,][0-9]+)*$');
+final _ruZeroDecimalRegex = RegExp(r'^0,([0-9]+)$');
 final _ruNumericResultRegex = RegExp(
-  r'^-?[0-9]+(?:[.,][0-9]+)*(?:x-?[0-9]+(?:[.,][0-9]+)*)*$',
+  r'^-?[0-9]+(?:[.,][0-9]+)*(?:(?:x|-)[0-9]+(?:[.,][0-9]+)*)*(?:\s*[+\-*/=]\s*-?[0-9]+(?:[.,][0-9]+)*(?:(?:x|-)[0-9]+(?:[.,][0-9]+)*)*)*$',
 );
 
 const _ruZeroWords = {'ноль', 'нуль'};
@@ -912,13 +913,110 @@ _ParsedRuNumber? _parseRuNumberAt(List<_RuToken> tokens, int index) {
   );
 }
 
+enum _RuItemKind { number, mathOp, word }
+
+class _RuItem {
+  const _RuItem({
+    required this.kind,
+    required this.text,
+    this.leading = '',
+    this.trailing = '',
+    this.zeroCodeDigits,
+    this.hasDimension = false,
+  });
+
+  final _RuItemKind kind;
+  final String text;
+  final String leading;
+  final String trailing;
+
+  /// Non-null when this number is `0,<digits>` produced either implicitly from
+  /// "ноль <num>" (without explicit "запятая/целых/точка") or directly by STT
+  /// as `0,<digits>` — so a multi-number code sequence like "0,8, 28, 36"
+  /// collapses `0,8` → `08` (`08-28-36`).
+  final String? zeroCodeDigits;
+  final bool hasDimension;
+}
+
+/// Checks if a math operator starts at [index] in [tokens].
+/// Returns `(symbol, nextIndex, trailingPunct)` or `null`.
+({String op, int nextIndex, String trailing})? _parseRuMathOpAt(
+  List<_RuToken> tokens,
+  int index, {
+  required bool hasLeftNumber,
+}) {
+  if (index >= tokens.length) return null;
+  final tok = tokens[index];
+  final w = tok.core;
+  if (tok.leading.isNotEmpty) return null;
+
+  // Symbolic math operators already emitted by STT.
+  if (tok.raw == '+' || tok.raw == '*' || tok.raw == '/' || tok.raw == '=') {
+    return (op: tok.raw, nextIndex: index + 1, trailing: '');
+  }
+  if (tok.raw == '-' && hasLeftNumber) {
+    return (op: '-', nextIndex: index + 1, trailing: '');
+  }
+
+  final hasRightNumber =
+      index + 1 < tokens.length && _parseRuNumberAt(tokens, index + 1) != null;
+
+  if (w == 'плюс' && (hasLeftNumber || hasRightNumber)) {
+    return (op: '+', nextIndex: index + 1, trailing: tok.trailing);
+  }
+  if (w == 'минус' && hasLeftNumber && hasRightNumber) {
+    return (op: '-', nextIndex: index + 1, trailing: tok.trailing);
+  }
+  if (w == 'умножить') {
+    if (tok.trailing.isEmpty &&
+        index + 1 < tokens.length &&
+        tokens[index + 1].core == 'на' &&
+        tokens[index + 1].leading.isEmpty) {
+      final after = index + 2;
+      if (hasLeftNumber ||
+          (after < tokens.length && _parseRuNumberAt(tokens, after) != null)) {
+        return (op: '*', nextIndex: after, trailing: tokens[index + 1].trailing);
+      }
+    }
+    if (hasLeftNumber || hasRightNumber) {
+      return (op: '*', nextIndex: index + 1, trailing: tok.trailing);
+    }
+  }
+  if (w == 'разделить' || w == 'делить' || w == 'поделить') {
+    if (tok.trailing.isEmpty &&
+        index + 1 < tokens.length &&
+        tokens[index + 1].core == 'на' &&
+        tokens[index + 1].leading.isEmpty) {
+      final after = index + 2;
+      if (hasLeftNumber ||
+          (after < tokens.length && _parseRuNumberAt(tokens, after) != null)) {
+        return (op: '/', nextIndex: after, trailing: tokens[index + 1].trailing);
+      }
+    }
+    if (hasLeftNumber || hasRightNumber) {
+      return (op: '/', nextIndex: index + 1, trailing: tok.trailing);
+    }
+  }
+  if ((w == 'равно' || w == 'равняется') &&
+      (hasLeftNumber || hasRightNumber)) {
+    return (op: '=', nextIndex: index + 1, trailing: tok.trailing);
+  }
+
+  return null;
+}
+
 /// Applies numeric mode to [text]:
 /// - Handles pure DE/EN numeric strings via [toNumericOnly].
 /// - Converts Russian number words anywhere inside phrases (including
 ///   decimals like "ноль пять" → "0,5" and dimensions like
 ///   "триста тридцать три на два" → "333x2").
-/// - Strips a trailing period when the whole output is a standalone number or
-///   dimension expression.
+/// - Converts mathematical words ("плюс", "минус", "умножить на",
+///   "разделить на", "равно") into symbols (`+`, `-`, `*`, `/`, `=`).
+/// - Formats consecutive number sequences (e.g. "0,8, 28, 36" or
+///   "ноль восемь, ноль один") as hyphen-joined codes ("08-28-36", "08-01"),
+///   while preserving decimal commas for standalone numbers and math examples.
+/// - Strips a trailing period when the whole output is a standalone number,
+///   code sequence, dimension, or math expression.
 String applyNumericMode(String text) {
   if (!_ruCyrillicRegex.hasMatch(text)) {
     final deOrEn = toNumericOnly(text);
@@ -930,13 +1028,28 @@ String applyNumericMode(String text) {
 
   final rawTokens = trimmed.split(_ruWsRegex);
   final tokens = rawTokens.map(_splitRuToken).toList(growable: false);
-  final out = <String>[];
+  final items = <_RuItem>[];
 
   var i = 0;
   while (i < tokens.length) {
+    final prevIsNumber =
+        items.isNotEmpty && items.last.kind == _RuItemKind.number;
+    final mathOp = _parseRuMathOpAt(tokens, i, hasLeftNumber: prevIsNumber);
+    if (mathOp != null) {
+      items.add(
+        _RuItem(
+          kind: _RuItemKind.mathOp,
+          text: mathOp.op,
+          trailing: mathOp.trailing,
+        ),
+      );
+      i = mathOp.nextIndex;
+      continue;
+    }
+
     final first = _parseRuNumberAt(tokens, i);
     if (first == null) {
-      out.add(tokens[i].raw);
+      items.add(_RuItem(kind: _RuItemKind.word, text: tokens[i].raw));
       i++;
       continue;
     }
@@ -945,6 +1058,14 @@ String applyNumericMode(String text) {
     var trailing = first.trailing;
     var next = first.nextIndex;
     var prevZeroWord = first.isZeroWord;
+    var hasDimension = false;
+    String? zeroCodeDigits;
+    if (!first.fromWords) {
+      final m = _ruZeroDecimalRegex.firstMatch(acc);
+      if (m != null) {
+        zeroCodeDigits = m.group(1);
+      }
+    }
 
     // Chain decimals ("ноль пять", "два целых пять десятых") and
     // dimension multipliers ("триста тридцать три на два" → "333x2").
@@ -952,11 +1073,12 @@ String applyNumericMode(String text) {
       final curTok = tokens[next];
       final w = curTok.core;
 
-      // Case 1: "ноль пять" / "ноль 5" → "0,5"
+      // Case 1: "ноль пять" / "ноль 5" → "0,5" (or "05" in a code sequence)
       if (prevZeroWord && curTok.leading.isEmpty) {
         final frac = _parseRuNumberAt(tokens, next);
         if (frac != null && !frac.text.startsWith('-')) {
           acc = '0,${frac.text}';
+          zeroCodeDigits = frac.text;
           trailing = frac.trailing;
           next = frac.nextIndex;
           prevZeroWord = false;
@@ -974,6 +1096,7 @@ String applyNumericMode(String text) {
         if (frac != null && frac.leading.isEmpty && !frac.text.startsWith('-')) {
           final sep = isDotWord ? '.' : ',';
           acc = '$acc$sep${frac.text}';
+          zeroCodeDigits = null; // explicit decimal word keeps comma/dot
           trailing = frac.trailing;
           next = frac.nextIndex;
           prevZeroWord = false;
@@ -994,7 +1117,6 @@ String applyNumericMode(String text) {
           curTok.trailing.isEmpty) {
         final rhs = _parseRuNumberAt(tokens, next + 1);
         if (rhs != null && rhs.leading.isEmpty) {
-          // Allow rhs itself to start with "ноль пять" → "0,5".
           var rhsText = rhs.text;
           var rhsTrailing = rhs.trailing;
           var rhsNext = rhs.nextIndex;
@@ -1009,6 +1131,8 @@ String applyNumericMode(String text) {
             }
           }
           acc = '${acc}x$rhsText';
+          hasDimension = true;
+          zeroCodeDigits = null;
           trailing = rhsTrailing;
           next = rhsNext;
           prevZeroWord = false;
@@ -1019,13 +1143,74 @@ String applyNumericMode(String text) {
       break;
     }
 
-    out.add('${first.leading}$acc$trailing');
+    items.add(
+      _RuItem(
+        kind: _RuItemKind.number,
+        text: acc,
+        leading: first.leading,
+        trailing: trailing,
+        zeroCodeDigits: zeroCodeDigits,
+        hasDimension: hasDimension,
+      ),
+    );
     i = next;
   }
 
+  // Pass 2: join consecutive standalone numbers (separated by whitespace or
+  // pause commas) into hyphenated code sequences ("0,8, 28, 36" → "08-28-36",
+  // "0,8, 0,1" → "08-01"). Does not trigger for single numbers, dimensions,
+  // or numbers separated by math operators.
+  final out = <String>[];
+  var idx = 0;
+  while (idx < items.length) {
+    final item = items[idx];
+    if (item.kind == _RuItemKind.word) {
+      out.add(item.text);
+      idx++;
+      continue;
+    }
+    if (item.kind == _RuItemKind.mathOp) {
+      out.add('${item.text}${item.trailing}');
+      idx++;
+      continue;
+    }
+
+    // Check if this starts a sequence of 2+ consecutive numbers.
+    if (!item.hasDimension &&
+        (item.trailing.isEmpty || item.trailing == ',') &&
+        idx + 1 < items.length &&
+        items[idx + 1].kind == _RuItemKind.number &&
+        !items[idx + 1].hasDimension &&
+        items[idx + 1].leading.isEmpty) {
+      final seq = <_RuItem>[item];
+      var end = idx + 1;
+      while (end < items.length &&
+          items[end].kind == _RuItemKind.number &&
+          !items[end].hasDimension &&
+          items[end].leading.isEmpty) {
+        seq.add(items[end]);
+        final tr = items[end].trailing;
+        end++;
+        if (tr.isNotEmpty && tr != ',') break;
+      }
+
+      if (seq.length >= 2) {
+        final joined = seq
+            .map((e) => e.zeroCodeDigits != null ? '0${e.zeroCodeDigits}' : e.text)
+            .join('-');
+        out.add('${seq.first.leading}$joined${seq.last.trailing}');
+        idx = end;
+        continue;
+      }
+    }
+
+    out.add('${item.leading}${item.text}${item.trailing}');
+    idx++;
+  }
+
   var result = out.join(' ');
-  // If the entire output is just a standalone number or dimension expression
-  // with a trailing period (added by STT), strip the trailing period.
+  // If the entire output is a standalone number, code sequence, dimension, or
+  // math expression with a trailing period (added by STT), strip the period.
   if (result.endsWith('.')) {
     final withoutDot = result.substring(0, result.length - 1);
     if (_ruNumericResultRegex.hasMatch(withoutDot)) {
